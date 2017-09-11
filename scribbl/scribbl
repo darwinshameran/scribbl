@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+#  vim: set ts=4 sw=4 tw=79 et :
+"""Download image-based documents from scribd.com."""
+
+import sys
+import re
+import argparse
+from typing import Tuple, Union, Optional
+
+import requests
+import img2pdf
+
+SESSION = requests.session()
+
+
+def generate_pdf(bytes_images: list, output: str) -> None:
+    """Generate PDF file from a list of bytes.
+
+    Generate a PDF file by embedding images in it. The images are stored in
+    the list `bytes_images` as bytestrings.
+
+    Args:
+        bytes_images: List containing the bytes of all images.
+        output: Filename output.
+    """
+    bytes_images = img2pdf.convert(bytes_images)
+
+    with open(output, "wb") as pdf:
+        pdf.write(bytes_images)
+
+
+def _req(url: str, img: Optional[bool] = False) -> Tuple[Union[bytes, str], int]:  # NOQA
+    """Send a GET request and return the response.
+
+    Args:
+        img: True if we're fetching an image, False otherwise.
+    Raises:
+        requests.exceptions.RequestException: If request generated an error.
+    Returns:
+        str: If the resource we're fetching is not an image.
+        bytes: If the resource we're fetching is an image.
+    """
+    try:
+        request = SESSION.get(url)
+    except requests.exceptions.RequestException:
+        sys.stdout.write("Error fetching url, aborting.")
+        raise
+    else:
+        response = request.content if img is True else request.text
+
+    return (response, request.status_code)
+
+
+def extract_links(url: str) -> list:
+    """Extract image links.
+
+    Get the page HTML source, use the regex module to extract our desired links
+    and substitute certain strings. (see dict `re_repl`)
+
+    Args:
+        url: Url to document.
+    Raises:
+        SystemExit: If the url returns a non-OK HTTP status code
+   """
+    response, status = _req(url)
+
+    if status != requests.codes.ok:
+        raise SystemExit("Error: URL returned a non-OK HTTP status code ("
+                         "{})".format(status))
+
+    re_repl = {
+        "html.scribd.com": "html1-f.scribdassets.com",
+        "/pages/": "/images/",
+        ".jsonp": ".jpg"
+    }
+
+    re_sub_links = re.compile("|".join(re_repl.keys()))
+    re_find_links = re.compile("(https?.*?html[1-4].*?[pn]g)")
+
+    response = re_sub_links.sub(lambda x: re_repl[x.group(0)], response)
+    links = re_find_links.findall(response)
+
+    return links
+
+
+def download(document_id: int, output: str) -> None:
+    """Download all images from a scribd document and embed them in a PDF file.
+
+    Fetches all images from a scribd.com document, stores them as bytestrings
+    in the list `bytes_images`, when all of the images have been fetched,
+    a PDF file consisting of all downloaded images is generated.
+
+    Args:
+        document_id: Id of document that can be found in the document url.
+        output: Output target of the generated PDF file.
+
+    Raises:
+        TypeError: if document_id arg is not an integer.
+    """
+    bytes_images = []
+    downloaded_n = 1
+
+    document_url = "https://www.scribd.com/doc/{}".format(document_id)
+    links = extract_links(document_url)
+
+    for link in links:
+        bytes_, status = _req(link, img=True)
+
+        if status != requests.codes.ok:
+            link = link.replace(".jpg", ".png")
+            bytes_, _ = _req(link, img=True)
+
+        sys.stdout.write("Downloaded {}/{}\n".format(downloaded_n, len(links)))
+        bytes_images.append(bytes_)
+
+        downloaded_n += 1
+
+    generate_pdf(bytes_images, output)
+
+
+if __name__ == "__main__":
+    # Code below will only be executed when this file is run directly, as
+    # opposed to imported.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--id", help="Document id to download",
+                        type=int, required=True)
+    parser.add_argument("--output", help="Filename output target")
+    args = parser.parse_args()
+
+    if not args.output:
+        args.output = "{}.pdf".format(args.id)
+
+    download(args.id, args.output)
+
+    sys.stdout.write("Download complete: {}\n".format(args.output))
